@@ -14,7 +14,7 @@ parser.add_argument("api_secret", help="Enter your API secret here", type=str)
 parser.add_argument("keywords", help="Enter the keywords to search here, comma delimited", type=str)
 parser.add_argument("path", help="Enter the output folder path", type=str)
 parser.add_argument("category", help="Enter the category of images", type=str)
-parser.add_argument("--num_images", help="Number of images")
+parser.add_argument("--num_images", help="Number of images", type=int)
 args = parser.parse_args()
 
 num_images = 200
@@ -37,6 +37,10 @@ if not os.path.isdir(path):
         os.makedirs(path)
 
 for i, photo in enumerate(photos):
+    
+    count = i+1
+    if (count % 10 == 0):
+        print("Progress: {}/{}".format(count, num_images))
 
     server = photo.get('server')
     id = photo.get('id')
