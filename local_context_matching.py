@@ -14,6 +14,7 @@ from typing import Tuple, Any, List
 # region to the source image within the local context. A simple texture descriptor is computed as a 5x5 median filter of image gradient
 # magnitude at each pixel, and the descriptors of the two images are compared via SSD.
 
+LC_SCALES = [1.0, 0.90, 0.81]
 
 def getMaskEdge(bin_mask: np.ndarray) -> Tuple[tuple, ...]:
     np_pts = np.where(bin_mask)
@@ -53,11 +54,11 @@ def growBinaryMask(bin_mask: np.ndarray, edge_list: Tuple[tuple, ...]):
     return tuple(grown_edges)
 
 
-def getSurroundingRegion(target_img: np.ndarray):
+def getSurroundingRegion(target_img: np.ndarray) -> Tuple[np.ndarray, tuple]:
     """
     Returns a boolean array of the image which contains True values at the locations of pixels in the local context.
     - Must identify transparency to find the hole
-    - Must work around edges
+    - Must work around image border
     """
     assert target_img.dtype == np.uint8
 
@@ -69,24 +70,73 @@ def getSurroundingRegion(target_img: np.ndarray):
     for i in range(80):
         mask_edge = growBinaryMask(grown_mask, mask_edge)
 
+    # Find the box surrounding this region (useful for the scoreCandidate function)
+    mask_edge = np.array(mask_edge)
+    topLeft = mask_edge.min(axis=0)
+    bottomRight = mask_edge.max(axis=0)
+
     # Find only the grown region
     grown_mask[mask] = False
-    return grown_mask
+    return grown_mask, (topLeft[0], topLeft[1], bottomRight[0], bottomRight[1])  # Boolean mask image and box coords
 
 
-def scoreSceneImage(candidate_img: np.ndarray, local_context_img: np.ndarray, local_context_descriptor: np.ndarray):
+def scoreCandidate(candidate_img: np.ndarray, lc_mask: np.ndarray, lc_box: tuple, original_img: np.ndarray):
     """
     Scores scene images by the metric of a weighted sum between the negative of the magnitude of the fill's translational
     offset, the pixel-wise SSD alignment score between the local context of the hole and the local context of the fill,
     and the SSD between the texture descriptor of the local context of the hole and the texture descriptor of the local
     context of the fill.
     """
-    pass
+    H, W, _ = candidate_img.shape
+    top_left = (lc_box[0], lc_box[1])  # No matter the scaling, this is our anchor
+
+    M_crop = lc_mask[lc_box[0]:lc_box[2], lc_box[1]:lc_box[3]].astype(np.uint8)          # Mask that is true on the LC region in the target image
+    T_crop = original_img[lc_box[0]:lc_box[2], lc_box[1]:lc_box[3]].astype(np.uint8)     # Target image containing the LC
+    I = candidate_img.astype(np.float32)  # Candidate image that has regions which might fit the LC
+
+    best_ssd_score = np.inf  # We are looking for a small SSD score
+    best_lc_fit = None  # This will be (row_i, col_i, scale_enum)
+
+    for scale_i, scale in enumerate(LC_SCALES):
+        # Scale local context
+        res_shape = (int(M_crop.shape[1] * scale), int(M_crop.shape[0] * scale))
+        res_lc_mask = cv2.resize(M_crop, res_shape).astype(np.float32)
+        res_lc_temp = cv2.resize(T_crop, res_shape).astype(np.float32)
+
+        # Note that the SSD dimension changes depending on the scale of the template
+        res_ssd_cost = np.zeros((H-res_shape[1]+1, W-res_shape[0]+1), dtype=np.float32)
+        for ch in range(3):
+            Tch = res_lc_temp[:,:,ch]
+            Mch = res_lc_mask
+            Ich = I[:,:,ch]
+            uncropped_ssd_cost = ((Mch*Tch)**2).sum() - 2.0*cv2.filter2D(Ich, ddepth=-1, kernel=Mch*Tch, anchor=(0,0)) + \
+                                 cv2.filter2D(Ich**2, ddepth=-1, kernel=Mch, anchor=(0,0))
+            # Crops the SSD image so that only fully-fit SSD's are included
+            res_ssd_cost += uncropped_ssd_cost[:-Tch.shape[0]+1, :-Tch.shape[1]+1]
+            # assert np.all(res_ssd_cost >= 0.0)  FIXME
+
+        # Punish far translations
+        # TRANSLATION_PUNISHMENT_MAT = np.ones_like(res_ssd_cost)  # TODO Change this to something reasonable (must be computed here)
+        # res_ssd_cost *= TRANSLATION_PUNISHMENT_MAT
+
+        res_best_score = res_ssd_cost.min() / scale  # In order to account for a smaller kernel size, the SSD score is divided by the scale
+        if res_best_score < best_ssd_score:
+            best_ssd_score = res_best_score
+            best_lc_fit = np.unravel_index(res_ssd_cost.argmin(), res_ssd_cost.shape) + (scale_i,)
+
+    # TODO Return the pixel coordinate at the highest-scored anchor point along with its scale. This is necessary in the
+    # future for when we copy the pixels from the candidate image into the target image.
+
+    return best_ssd_score, best_lc_fit
 
 
 if __name__ == '__main__':
     target = cv2.imread(r"C:\Users\luked\OneDrive\Documents\UIUC\CS 445\Final Project\CS445-Scene-Completion-Project\target_img.png", cv2.IMREAD_UNCHANGED)
-    reg = getSurroundingRegion(target)
+    candidate = target[:,:,[0,1,2]]  # For testing
+
+    reg, box = getSurroundingRegion(target)
     mask = np.ones_like(target) * 255
     mask[reg] = np.array([0, 0, 0, 255])
     cv2.imwrite('test.png', mask)
+
+    scoreCandidate(candidate, reg, box, target[:,:,[0,1,2]])
