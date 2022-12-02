@@ -54,7 +54,7 @@ def growBinaryMask(bin_mask: np.ndarray, edge_list: Tuple[tuple, ...]):
     return tuple(grown_edges)
 
 
-def getSurroundingRegion(target_img: np.ndarray) -> Tuple[np.ndarray, tuple]:
+def getLocalContext(target_img: np.ndarray) -> Tuple[np.ndarray, tuple]:
     """
     Returns a boolean array of the image which contains True values at the locations of pixels in the local context.
     - Must identify transparency to find the hole
@@ -62,12 +62,14 @@ def getSurroundingRegion(target_img: np.ndarray) -> Tuple[np.ndarray, tuple]:
     """
     assert target_img.dtype == np.uint8
 
+    LC_CONTEXT_RADIUS = 80
+
     mask = target_img[:, :, 3] == 0  # Get transparent region
     mask_edge = getMaskEdge(mask)
     grown_mask = mask.copy()
 
     # Grow the mask 80 times to get a (roughly) 80-point radius
-    for i in range(80):
+    for i in range(LC_CONTEXT_RADIUS):
         mask_edge = growBinaryMask(grown_mask, mask_edge)
 
     # Find the box surrounding this region (useful for the scoreCandidate function)
@@ -77,7 +79,7 @@ def getSurroundingRegion(target_img: np.ndarray) -> Tuple[np.ndarray, tuple]:
 
     # Find only the grown region
     grown_mask[mask] = False
-    return grown_mask, (topLeft[0], topLeft[1], bottomRight[0], bottomRight[1])  # Boolean mask image and box coords
+    return grown_mask, (topLeft[0], topLeft[1], bottomRight[0]-topLeft[0], bottomRight[1]-topLeft[1])  # Boolean mask image and box coords
 
 
 def scoreCandidate(candidate_img: np.ndarray, lc_mask: np.ndarray, lc_box: tuple, original_img: np.ndarray):
@@ -86,12 +88,13 @@ def scoreCandidate(candidate_img: np.ndarray, lc_mask: np.ndarray, lc_box: tuple
     offset, the pixel-wise SSD alignment score between the local context of the hole and the local context of the fill,
     and the SSD between the texture descriptor of the local context of the hole and the texture descriptor of the local
     context of the fill.
+
+    Returns the best local context fit score and coordinates where to align the LC box within the candidate image
     """
     H, W, _ = candidate_img.shape
-    top_left = (lc_box[0], lc_box[1])  # No matter the scaling, this is our anchor
 
-    M_crop = lc_mask[lc_box[0]:lc_box[2], lc_box[1]:lc_box[3]].astype(np.uint8)          # Mask that is true on the LC region in the target image
-    T_crop = original_img[lc_box[0]:lc_box[2], lc_box[1]:lc_box[3]].astype(np.uint8)     # Target image containing the LC
+    M_crop_lc = lc_mask[lc_box[0]:lc_box[0]+lc_box[2], lc_box[1]:lc_box[1]+lc_box[3]].astype(np.uint8)          # Mask that is true on the LC region in the target image
+    T_crop_lc = original_img[lc_box[0]:lc_box[0]+lc_box[2], lc_box[1]:lc_box[1]+lc_box[3]].astype(np.uint8)     # Target image containing the LC
     I = candidate_img.astype(np.float32)  # Candidate image that has regions which might fit the LC
 
     best_ssd_score = np.inf  # We are looking for a small SSD score
@@ -99,9 +102,9 @@ def scoreCandidate(candidate_img: np.ndarray, lc_mask: np.ndarray, lc_box: tuple
 
     for scale_i, scale in enumerate(LC_SCALES):
         # Scale local context
-        res_shape = (int(M_crop.shape[1] * scale), int(M_crop.shape[0] * scale))
-        res_lc_mask = cv2.resize(M_crop, res_shape).astype(np.float32)
-        res_lc_temp = cv2.resize(T_crop, res_shape).astype(np.float32)
+        res_shape = (int(M_crop_lc.shape[1] * scale), int(M_crop_lc.shape[0] * scale))
+        res_lc_mask = cv2.resize(M_crop_lc, res_shape).astype(np.float32)
+        res_lc_temp = cv2.resize(T_crop_lc, res_shape).astype(np.float32)
 
         # Note that the SSD dimension changes depending on the scale of the template
         res_ssd_cost = np.zeros((H-res_shape[1]+1, W-res_shape[0]+1), dtype=np.float32)
@@ -113,30 +116,49 @@ def scoreCandidate(candidate_img: np.ndarray, lc_mask: np.ndarray, lc_box: tuple
                                  cv2.filter2D(Ich**2, ddepth=-1, kernel=Mch, anchor=(0,0))
             # Crops the SSD image so that only fully-fit SSD's are included
             res_ssd_cost += uncropped_ssd_cost[:-Tch.shape[0]+1, :-Tch.shape[1]+1]
-            # assert np.all(res_ssd_cost >= 0.0)  FIXME
 
         # Punish far translations
-        # TRANSLATION_PUNISHMENT_MAT = np.ones_like(res_ssd_cost)  # TODO Change this to something reasonable (must be computed here)
+        # TRANSLATION_PUNISHMENT_MAT = np.ones_like(res_ssd_cost)
         # res_ssd_cost *= TRANSLATION_PUNISHMENT_MAT
 
         res_best_score = res_ssd_cost.min() / scale  # In order to account for a smaller kernel size, the SSD score is divided by the scale
         if res_best_score < best_ssd_score:
             best_ssd_score = res_best_score
-            best_lc_fit = np.unravel_index(res_ssd_cost.argmin(), res_ssd_cost.shape) + (scale_i,)
-
-    # TODO Return the pixel coordinate at the highest-scored anchor point along with its scale. This is necessary in the
-    # future for when we copy the pixels from the candidate image into the target image.
+            best_lc_fit = np.unravel_index(res_ssd_cost.argmin(), res_ssd_cost.shape) + (res_shape[1], res_shape[0])
 
     return best_ssd_score, best_lc_fit
 
 
+def paintRegion(canvas: np.ndarray, cutout_region: np.ndarray, cutout_mask: np.ndarray, dst_box_lc_crop: tuple):
+    assert cutout_region.shape[:2] == cutout_mask.shape
+
+    src_H, src_W = cutout_region.shape[:2]
+    dst_y, dst_x, dst_H, dst_W = dst_box_lc_crop
+
+    if not (src_H == dst_H and src_W == dst_W):
+        cutout_region = cv2.resize(cutout_region, (dst_W, dst_H))
+
+    canvas[dst_y:dst_y+dst_H, dst_x:dst_x+dst_W][cutout_mask] = cutout_region[cutout_mask]
+
+
 if __name__ == '__main__':
-    target = cv2.imread(r"C:\Users\luked\OneDrive\Documents\UIUC\CS 445\Final Project\CS445-Scene-Completion-Project\target_img.png", cv2.IMREAD_UNCHANGED)
-    candidate = target[:,:,[0,1,2]]  # For testing
+    target = cv2.imread(r"target_img.png", cv2.IMREAD_UNCHANGED)
+    candidate = cv2.imread(r"target_shifted.jpg", cv2.IMREAD_UNCHANGED)  # For testing
 
-    reg, box = getSurroundingRegion(target)
-    mask = np.ones_like(target) * 255
-    mask[reg] = np.array([0, 0, 0, 255])
-    cv2.imwrite('test.png', mask)
+    hole_mask_full = target[:,:,3] == 0.0
+    reg_full, lc_box = getLocalContext(target)
+    target = target[:,:,[0,1,2]]
+    lc_mask_full = np.zeros(target.shape[:2], dtype=np.uint8)
+    lc_mask_full[reg_full] = 1
 
-    scoreCandidate(candidate, reg, box, target[:,:,[0,1,2]])
+    # This function returns the score of the best LC match and the region of pixels in the candidate that should be
+    # resized the put in the target image
+    score, (src_row, src_col, src_H, src_W) = scoreCandidate(candidate, reg_full, lc_box, target)
+
+    # Assume the score is good enough
+    cutout_region = candidate[src_row:src_row+src_H, src_col:src_col+src_W]
+
+    cv2.imwrite('unfilled_target.jpg', target)
+    hole_mask_lc_crop = hole_mask_full[lc_box[0]:lc_box[0]+lc_box[2], lc_box[1]:lc_box[1]+lc_box[3]]
+    paintRegion(target, cutout_region, hole_mask_lc_crop, lc_box)
+    cv2.imwrite('filled_target.jpg', target)
