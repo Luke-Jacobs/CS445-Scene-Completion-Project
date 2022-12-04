@@ -107,12 +107,17 @@ def scoreCandidate(candidate_img: np.ndarray, lc_mask: np.ndarray, lc_box: tuple
 
     for scale_i, scale in enumerate(LC_SCALES):
         # Scale local context
-        res_shape = (int(M_crop_lc.shape[1] * scale), int(M_crop_lc.shape[0] * scale))
-        res_lc_mask = cv2.resize(M_crop_lc, res_shape).astype(np.float32)
-        res_lc_temp = cv2.resize(T_crop_lc, res_shape).astype(np.float32)
+        res_shape = (int(M_crop_lc.shape[0] * scale), int(M_crop_lc.shape[1] * scale))
+        # The size given to cv2.resize needs to be in (width, height)
+        res_lc_mask = cv2.resize(M_crop_lc, (res_shape[1], res_shape[0])).astype(np.float32)
+        res_lc_temp = cv2.resize(T_crop_lc, (res_shape[1], res_shape[0])).astype(np.float32)
+
+        # If we cannot fully fit the resized local context into an image, throw it out
+        if (H-res_shape[0]+1) < 0 or (W-res_shape[1]+1) < 0:
+            continue
 
         # Note that the SSD dimension changes depending on the scale of the template
-        res_ssd_cost = np.zeros((H-res_shape[1]+1, W-res_shape[0]+1), dtype=np.float32)
+        res_ssd_cost = np.zeros((H-res_shape[0]+1, W-res_shape[1]+1), dtype=np.float32)
         for ch in range(3):
             Tch = res_lc_temp[:,:,ch]
             Mch = res_lc_mask
@@ -133,7 +138,7 @@ def scoreCandidate(candidate_img: np.ndarray, lc_mask: np.ndarray, lc_box: tuple
         res_best_score = res_ssd_cost.min() / scale  # In order to account for a smaller kernel size, the SSD score is divided by the scale
         if res_best_score < best_ssd_score:  # Lower scores are better
             best_ssd_score = res_best_score
-            best_lc_fit = np.unravel_index(res_ssd_cost.argmin(), res_ssd_cost.shape) + (res_shape[1], res_shape[0])
+            best_lc_fit = np.unravel_index(res_ssd_cost.argmin(), res_ssd_cost.shape) + (res_shape[0], res_shape[1])
 
     return best_ssd_score, best_lc_fit
 
@@ -165,7 +170,7 @@ def findBestHoleFill(original_img: np.ndarray, hole_mask: np.ndarray, candidates
     print('Looking at %d candidates...' % len(candidates))
     for i, candidate_path in enumerate(candidates):
         candidate = cv2.imread(candidate_path)
-        score, src_lc_box = scoreCandidate(candidate, lc_mask_full == 1, lc_box, target)
+        score, src_lc_box = scoreCandidate(candidate, lc_mask_full == 1, lc_box, original_img)
         if score < best_candidate_score:
             best_candidate_score = score
             src_row, src_col, src_H, src_W = src_lc_box
@@ -177,17 +182,20 @@ def findBestHoleFill(original_img: np.ndarray, hole_mask: np.ndarray, candidates
     cutout_region = best_candidate_img[src_row:src_row + src_H, src_col:src_col + src_W]
     cutout_region = cv2.resize(cutout_region, lc_dim)
 
-    cv2.imwrite('unfilled_target.jpg', target)
-    hole_mask_lc_crop = hole_mask_full[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]]
-    target_lc_crop = target[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]]
+    cv2.imwrite('unfilled_target.jpg', original_img)
+    hole_mask_lc_crop = hole_mask[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]]
+    target_lc_crop = original_img[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]]
 
     # ===== To add when graphcuts is working =====
     # blended_lc_reg = graphCutSegmentation(cutout_region, hole_mask_lc_crop, target_lc_crop)
     # cv2.imwrite('blended_lc_region.jpg', blended_lc_reg)
     # target[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]] = blended_lc_reg
 
-    target[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]] = cutout_region
-    cv2.imwrite('filled_target.jpg', target)
+    filled_img = original_img.copy()
+    filled_img[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]] = cutout_region
+    cv2.imwrite('filled_target.jpg', filled_img)
+
+    return filled_img
 
 
 if __name__ == '__main__':
@@ -196,3 +204,4 @@ if __name__ == '__main__':
     target = target[:, :, [0, 1, 2]]
 
     findBestHoleFill(target, hole_mask_full, ['original_resized.jpg'])
+
