@@ -1,3 +1,4 @@
 output/
 train_256_places365standard*
 .idea/
+dataset*
