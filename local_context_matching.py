@@ -1,6 +1,9 @@
 import cv2
 import numpy as np
 from typing import Tuple, Any, List
+import pickle
+
+from poisson_graph_cut import *
 
 # Search for the surrounding region to the cutout in all the semantically-similar images (up to 200 best-matching scenes)
 # The "surrounding region" or local context is considered to be "all pixels within an 80 pixel radius of the hole's boundary"
@@ -54,7 +57,7 @@ def growBinaryMask(bin_mask: np.ndarray, edge_list: Tuple[tuple, ...]):
     return tuple(grown_edges)
 
 
-def getLocalContext(target_img: np.ndarray) -> Tuple[np.ndarray, tuple]:
+def getLocalContext(target_img: np.ndarray, hole_mask_full: np.ndarray) -> Tuple[np.ndarray, tuple]:
     """
     Returns a boolean array of the image which contains True values at the locations of pixels in the local context.
     - Must identify transparency to find the hole
@@ -64,11 +67,10 @@ def getLocalContext(target_img: np.ndarray) -> Tuple[np.ndarray, tuple]:
 
     LC_CONTEXT_RADIUS = 80
 
-    mask = target_img[:, :, 3] == 0  # Get transparent region
-    mask_edge = getMaskEdge(mask)
-    grown_mask = mask.copy()
+    mask_edge = getMaskEdge(hole_mask_full)
+    grown_mask = hole_mask_full.copy()
 
-    # Grow the mask 80 times to get a (roughly) 80-point radius
+    # Grow the mask 80 times to get a (roughly) 80-pixel radius
     for i in range(LC_CONTEXT_RADIUS):
         mask_edge = growBinaryMask(grown_mask, mask_edge)
 
@@ -77,8 +79,8 @@ def getLocalContext(target_img: np.ndarray) -> Tuple[np.ndarray, tuple]:
     topLeft = mask_edge.min(axis=0)
     bottomRight = mask_edge.max(axis=0)
 
-    # Find only the grown region
-    grown_mask[mask] = False
+    # Return only the grown region (LC) and the box around the LC
+    grown_mask[hole_mask_full] = False
     return grown_mask, (topLeft[0], topLeft[1], bottomRight[0]-topLeft[0], bottomRight[1]-topLeft[1])  # Boolean mask image and box coords
 
 
@@ -89,8 +91,11 @@ def scoreCandidate(candidate_img: np.ndarray, lc_mask: np.ndarray, lc_box: tuple
     and the SSD between the texture descriptor of the local context of the hole and the texture descriptor of the local
     context of the fill.
 
-    Returns the best local context fit score and coordinates where to align the LC box within the candidate image
+    Returns the best local context fit score for this candidate and coordinates where to align the LC box within the
+    candidate image ()
     """
+    PER_PIXEL_TRANSLATION_COST = 1e6  # TODO Adjust this value to properly punish far-away hole fills
+
     H, W, _ = candidate_img.shape
 
     M_crop_lc = lc_mask[lc_box[0]:lc_box[0]+lc_box[2], lc_box[1]:lc_box[1]+lc_box[3]].astype(np.uint8)          # Mask that is true on the LC region in the target image
@@ -98,7 +103,7 @@ def scoreCandidate(candidate_img: np.ndarray, lc_mask: np.ndarray, lc_box: tuple
     I = candidate_img.astype(np.float32)  # Candidate image that has regions which might fit the LC
 
     best_ssd_score = np.inf  # We are looking for a small SSD score
-    best_lc_fit = None  # This will be (row_i, col_i, scale_enum)
+    best_lc_fit = None  # This will be (row_pos, col_pos, rows, cols)
 
     for scale_i, scale in enumerate(LC_SCALES):
         # Scale local context
@@ -117,12 +122,16 @@ def scoreCandidate(candidate_img: np.ndarray, lc_mask: np.ndarray, lc_box: tuple
             # Crops the SSD image so that only fully-fit SSD's are included
             res_ssd_cost += uncropped_ssd_cost[:-Tch.shape[0]+1, :-Tch.shape[1]+1]
 
-        # Punish far translations
-        # TRANSLATION_PUNISHMENT_MAT = np.ones_like(res_ssd_cost)
-        # res_ssd_cost *= TRANSLATION_PUNISHMENT_MAT
+        # Punish far translations- FIXME, how to account for different res_ssd_cost shapes from different
+        row_coords, col_coords = np.meshgrid(np.arange(res_ssd_cost.shape[1]), np.arange(res_ssd_cost.shape[0]))
+        perc_down = lc_box[0] / original_img.shape[0]
+        perc_right = lc_box[1] / original_img.shape[1]
+        res_top_left = (perc_down * res_ssd_cost.shape[0], perc_right * res_ssd_cost.shape[1])
+        punishment_matrix = np.abs((row_coords - res_top_left[0]) + (col_coords - res_top_left[1]))  # res_top_left is wrong
+        res_ssd_cost += PER_PIXEL_TRANSLATION_COST * punishment_matrix
 
         res_best_score = res_ssd_cost.min() / scale  # In order to account for a smaller kernel size, the SSD score is divided by the scale
-        if res_best_score < best_ssd_score:
+        if res_best_score < best_ssd_score:  # Lower scores are better
             best_ssd_score = res_best_score
             best_lc_fit = np.unravel_index(res_ssd_cost.argmin(), res_ssd_cost.shape) + (res_shape[1], res_shape[0])
 
@@ -130,6 +139,10 @@ def scoreCandidate(candidate_img: np.ndarray, lc_mask: np.ndarray, lc_box: tuple
 
 
 def paintRegion(canvas: np.ndarray, cutout_region: np.ndarray, cutout_mask: np.ndarray, dst_box_lc_crop: tuple):
+    """
+    Paints `cutout_region` onto `canvas` at the region specified by `dst_box_lc_crop` and `cutout_mask`.
+    """
+
     assert cutout_region.shape[:2] == cutout_mask.shape
 
     src_H, src_W = cutout_region.shape[:2]
@@ -141,24 +154,45 @@ def paintRegion(canvas: np.ndarray, cutout_region: np.ndarray, cutout_mask: np.n
     canvas[dst_y:dst_y+dst_H, dst_x:dst_x+dst_W][cutout_mask] = cutout_region[cutout_mask]
 
 
-if __name__ == '__main__':
-    target = cv2.imread(r"target_img.png", cv2.IMREAD_UNCHANGED)
-    candidate = cv2.imread(r"target_shifted.jpg", cv2.IMREAD_UNCHANGED)  # For testing
-
-    hole_mask_full = target[:,:,3] == 0.0
-    reg_full, lc_box = getLocalContext(target)
-    target = target[:,:,[0,1,2]]
-    lc_mask_full = np.zeros(target.shape[:2], dtype=np.uint8)
-    lc_mask_full[reg_full] = 1
+def findBestHoleFill(original_img: np.ndarray, hole_mask: np.ndarray, candidates: List[str]):
+    lc_mask_full, lc_box = getLocalContext(original_img, hole_mask)
+    lc_mask_full = lc_mask_full.astype(np.uint8)
 
     # This function returns the score of the best LC match and the region of pixels in the candidate that should be
     # resized the put in the target image
-    score, (src_row, src_col, src_H, src_W) = scoreCandidate(candidate, reg_full, lc_box, target)
+    best_candidate = None
+    best_candidate_score = np.inf
+    print('Looking at %d candidates...' % len(candidates))
+    for i, candidate_path in enumerate(candidates):
+        candidate = cv2.imread(candidate_path)
+        score, src_lc_box = scoreCandidate(candidate, lc_mask_full == 1, lc_box, target)
+        if score < best_candidate_score:
+            best_candidate_score = score
+            src_row, src_col, src_H, src_W = src_lc_box
+            best_candidate = (candidate_path, src_row, src_col, src_H, src_W)
 
-    # Assume the score is good enough
-    cutout_region = candidate[src_row:src_row+src_H, src_col:src_col+src_W]
+    lc_dim = (lc_box[3], lc_box[2])
+    candidate_path, src_row, src_col, src_H, src_W = best_candidate
+    best_candidate_img = cv2.imread(candidate_path)
+    cutout_region = best_candidate_img[src_row:src_row + src_H, src_col:src_col + src_W]
+    cutout_region = cv2.resize(cutout_region, lc_dim)
 
     cv2.imwrite('unfilled_target.jpg', target)
-    hole_mask_lc_crop = hole_mask_full[lc_box[0]:lc_box[0]+lc_box[2], lc_box[1]:lc_box[1]+lc_box[3]]
-    paintRegion(target, cutout_region, hole_mask_lc_crop, lc_box)
+    hole_mask_lc_crop = hole_mask_full[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]]
+    target_lc_crop = target[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]]
+
+    # ===== To add when graphcuts is working =====
+    # blended_lc_reg = graphCutSegmentation(cutout_region, hole_mask_lc_crop, target_lc_crop)
+    # cv2.imwrite('blended_lc_region.jpg', blended_lc_reg)
+    # target[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]] = blended_lc_reg
+
+    target[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]] = cutout_region
     cv2.imwrite('filled_target.jpg', target)
+
+
+if __name__ == '__main__':
+    target = cv2.imread(r"target_img.png", cv2.IMREAD_UNCHANGED)
+    hole_mask_full = target[:, :, 3] == 0.0  # "full" means full size of target image
+    target = target[:, :, [0, 1, 2]]
+
+    findBestHoleFill(target, hole_mask_full, ['original_resized.jpg'])
