@@ -1,5 +1,7 @@
 import cv2
 import maxflow
+import scipy
+import scipy.sparse.linalg
 import numpy as np
 from typing import Tuple, Any, List
 
@@ -43,7 +45,7 @@ def graphCutSegmentation(object_img, mask, bg_img):
     bg_img: the background image
     """ 
     # Create initial graph
-    num_nodes = np.count_nonzero(mask)
+    num_nodes = mask.shape[0] * mask.shape[1]
     num_edges = 4 * num_nodes
     graph = maxflow.Graph[float](num_nodes, num_edges)
     nodes = graph.add_nodes(num_nodes)
@@ -53,33 +55,34 @@ def graphCutSegmentation(object_img, mask, bg_img):
     index = 0
     for j in range(mask.shape[0]):
         for i in range(mask.shape[1]):
-            if mask[j, i] != 0:
-                im2var[(j, i)] = index
-                index += 1
+            im2var[(j, i)] = index
+            index += 1
 
     # Fill the rest of the graph with edges
     for j in range(mask.shape[0]):
         for i in range(mask.shape[1]):
-            if mask[j, i] == 0:
-                continue
-            # Connect pixel from picture 1 to source node
+            # Connect pixel from picture 1 to dest node
             if (mask[j, i] == 1):
-                graph.add_tedge(nodes[im2var[(j, i)]], np.inf, 0)
-            # Connect pixel from picture 2 to dest node
-            if (mask[j, i] == 2):
                 graph.add_tedge(nodes[im2var[(j, i)]], 0, np.inf)
+            # Connect pixel from picture 2 to source node
+            if (mask[j, i] == 2):
+                graph.add_tedge(nodes[im2var[(j, i)]], np.inf, 0)
             # Compute cost from SSD based on gradient, add edge
-            if (j + 1 < mask.shape[0]) and (mask[j + 1, i] != 0):
-                cost = SSD(object_img[j, i], bg_img[j, i]) + SSD(object_img[j + 1, i], bg_img[j + 1, i])
+            if (j + 1 < mask.shape[0]):
+                cost = (SSD(object_img[j, i], bg_img[j, i]) + SSD(object_img[j + 1, i], bg_img[j + 1, i])) 
+                #/ (((object_img[j, i] - object_img[j + 1, i]) ** 2).sum() + ((bg_img[j, i] - bg_img[j + 1, i]) ** 2).sum() + 1)
+                #cost = SSD(object_img[j, i], object_img[j + 1, i]) + SSD(bg_img[j, i], bg_img[j + 1, i])
                 graph.add_edge(nodes[im2var[(j, i)]], nodes[im2var[(j + 1, i)]], cost, cost)
-            if (i + 1 < mask.shape[1]) and (mask[j, i + 1] != 0):
-                cost = SSD(object_img[j, i], bg_img[j, i]) + SSD(object_img[j, i + 1], bg_img[j, i + 1])
+            if (i + 1 < mask.shape[1]):
+                cost = SSD(object_img[j, i], bg_img[j, i]) + SSD(object_img[j, i + 1], bg_img[j, i + 1]) 
+                #/ (((object_img[j, i] - object_img[j, i + 1]) ** 2).sum() + ((bg_img[j, i] - bg_img[j, i + 1]) ** 2).sum() + 1)
+                #cost = SSD(object_img[j, i], object_img[j, i + 1]) + SSD(bg_img[j, i], bg_img[j, i + 1])
                 graph.add_edge(nodes[im2var[(j, i)]], nodes[im2var[(j, i + 1)]], cost, cost)
 
-    graph.maxflow()
+    flow = graph.maxflow()
 
     # Complete the mask
-    graph_mask = mask.copy() - 1
+    graph_mask = np.zeros((mask.shape[0], mask.shape[1]))
     for cor, index in im2var.items():
         graph_mask[cor[0], cor[1]] = int(graph.get_segment(nodes[index]))
 
@@ -135,7 +138,19 @@ def poissonBlend(object_img, object_mask, bg_img, bg_ul):
                             e = e + 1
                             A[e, im2var[y][x]] = 1
                             b[e] = bg_patch[j][i] + object_img[y][x] - object_img[j][i]
+                            
+    # Solve for v in least-squares problem
+    v = scipy.sparse.linalg.lsqr(A.tocsr(), b, atol=1e-12, btol=1e-12);
+    v_patch = v[0].reshape((im_h, im_w))
 
+    # Modify the patch to include new intensity values of source
+    output_patch = (v_patch * object_mask) + (bg_patch * (abs(object_mask - 1)))
+    
+    # Copy patch back into background image
+    output_img = bg_img.copy()
+    output_img[bg_ul[0]:bg_ul[0] + im_h, bg_ul[1]:bg_ul[1] + im_w] = output_patch
+
+    return output_img
 
 if __name__ == '__main__':
     pass
