@@ -69,10 +69,14 @@ def graphCutSegmentation(object_img, mask, bg_img):
                 graph.add_tedge(nodes[im2var[(j, i)]], np.inf, 0)
             # Compute cost from SSD based on gradient, add edge
             if (j + 1 < mask.shape[0]):
-                cost = SSD(object_img[j, i], bg_img[j, i]) + SSD(object_img[j + 1, i], bg_img[j + 1, i])
+                cost = (SSD(object_img[j, i], bg_img[j, i]) + SSD(object_img[j + 1, i], bg_img[j + 1, i])) 
+                #/ (((object_img[j, i] - object_img[j + 1, i]) ** 2).sum() + ((bg_img[j, i] - bg_img[j + 1, i]) ** 2).sum() + 1)
+                #cost = SSD(object_img[j, i], object_img[j + 1, i]) + SSD(bg_img[j, i], bg_img[j + 1, i])
                 graph.add_edge(nodes[im2var[(j, i)]], nodes[im2var[(j + 1, i)]], cost, cost)
             if (i + 1 < mask.shape[1]):
-                cost = SSD(object_img[j, i], bg_img[j, i]) + SSD(object_img[j, i + 1], bg_img[j, i + 1])
+                cost = SSD(object_img[j, i], bg_img[j, i]) + SSD(object_img[j, i + 1], bg_img[j, i + 1]) 
+                #/ (((object_img[j, i] - object_img[j, i + 1]) ** 2).sum() + ((bg_img[j, i] - bg_img[j, i + 1]) ** 2).sum() + 1)
+                #cost = SSD(object_img[j, i], object_img[j, i + 1]) + SSD(bg_img[j, i], bg_img[j, i + 1])
                 graph.add_edge(nodes[im2var[(j, i)]], nodes[im2var[(j, i + 1)]], cost, cost)
 
     flow = graph.maxflow()
