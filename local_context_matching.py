@@ -199,12 +199,11 @@ def findBestHoleFill(original_img: np.ndarray, hole_mask: np.ndarray, candidates
     # Blend entire LC box region into full image
     # blended_lc_reg_full = np.zeros_like(lc_mask_full)
     # blended_lc_reg_full[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]] = blended_lc_reg
-    for i in range(3):
-        cutout_region[:,:,i] = poissonBlend(cutout_region[:,:,i].astype(np.float64), blended_lc_reg == 1, orig_lc_crop[:,:,i].astype(np.float64), (0,0)).astype(np.uint8)
-
     filled_img = original_img.copy()
-    filled_img[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]] = cutout_region
-    # filled_img[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]] = cutout_region
+    for i in range(3):
+        filled_img[:,:,i] = poissonBlend(cutout_region[:,:,i].astype(np.float32), blended_lc_reg == 1,
+                                         filled_img[:,:,i].astype(np.float32), (lc_box[0], lc_box[1])).astype(np.uint8)
+
     cv2.imwrite('filled_target_blended.jpg', filled_img)
 
     return filled_img
