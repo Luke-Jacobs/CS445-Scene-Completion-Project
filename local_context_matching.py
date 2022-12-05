@@ -183,17 +183,29 @@ def findBestHoleFill(original_img: np.ndarray, hole_mask: np.ndarray, candidates
     cutout_region = cv2.resize(cutout_region, lc_dim)
 
     cv2.imwrite('unfilled_target.jpg', original_img)
-    hole_mask_lc_crop = hole_mask[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]]
-    target_lc_crop = original_img[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]]
+    # should be 1's
+    hole_mask_lc_crop = hole_mask[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]].astype(np.uint8)
+    # should be 0's
+    lc_mask_lc_crop = lc_mask_full[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]].astype(np.uint8)
+    orig_lc_crop = original_img[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]]
 
-    # ===== To add when graphcuts is working =====
-    # blended_lc_reg = graphCutSegmentation(cutout_region, hole_mask_lc_crop, target_lc_crop)
-    # cv2.imwrite('blended_lc_region.jpg', blended_lc_reg)
-    # target[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]] = blended_lc_reg
+    # ===== Graphcuts processing =====
+    # Build composite mask
+    comp_mask = np.ones_like(hole_mask_lc_crop) * 2  # Background is 2's
+    comp_mask[hole_mask_lc_crop == 1] = 1
+    comp_mask[lc_mask_lc_crop == 1] = 0
+    blended_lc_reg = graphCutSegmentation(cutout_region, comp_mask, orig_lc_crop).astype(np.uint8)
+
+    # Blend entire LC box region into full image
+    # blended_lc_reg_full = np.zeros_like(lc_mask_full)
+    # blended_lc_reg_full[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]] = blended_lc_reg
+    for i in range(3):
+        cutout_region[:,:,i] = poissonBlend(cutout_region[:,:,i].astype(np.float64), blended_lc_reg == 1, orig_lc_crop[:,:,i].astype(np.float64), (0,0)).astype(np.uint8)
 
     filled_img = original_img.copy()
     filled_img[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]] = cutout_region
-    cv2.imwrite('filled_target.jpg', filled_img)
+    # filled_img[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]] = cutout_region
+    cv2.imwrite('filled_target_blended.jpg', filled_img)
 
     return filled_img
 
