@@ -114,6 +114,7 @@ def scoreCandidate(candidate_img: np.ndarray, lc_mask: np.ndarray, lc_box: tuple
 
         # If we cannot fully fit the resized local context into an image, throw it out
         if (H-res_shape[0]+1) < 0 or (W-res_shape[1]+1) < 0:
+            print('Skipping candidate because it is too small compared to hole')
             continue
 
         # Note that the SSD dimension changes depending on the scale of the template
@@ -160,8 +161,11 @@ def paintRegion(canvas: np.ndarray, cutout_region: np.ndarray, cutout_mask: np.n
 
 
 def findBestHoleFill(original_img: np.ndarray, hole_mask: np.ndarray, candidates: List[str]):
+    BLENDING_BUFFER = 4  # Pixels of the foreground object to blend
+
     lc_mask_full, lc_box = getLocalContext(original_img, hole_mask)
     lc_mask_full = lc_mask_full.astype(np.uint8)
+    cv2.imwrite('local_context_example.png', lc_mask_full*255)
 
     # This function returns the score of the best LC match and the region of pixels in the candidate that should be
     # resized the put in the target image
@@ -182,7 +186,6 @@ def findBestHoleFill(original_img: np.ndarray, hole_mask: np.ndarray, candidates
     cutout_region = best_candidate_img[src_row:src_row + src_H, src_col:src_col + src_W]
     cutout_region = cv2.resize(cutout_region, lc_dim)
 
-    cv2.imwrite('unfilled_target.jpg', original_img)
     # should be 1's
     hole_mask_lc_crop = hole_mask[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]].astype(np.uint8)
     # should be 0's
@@ -197,20 +200,21 @@ def findBestHoleFill(original_img: np.ndarray, hole_mask: np.ndarray, candidates
     blended_lc_reg = graphCutSegmentation(cutout_region, comp_mask, orig_lc_crop).astype(np.uint8)
 
     # Blend entire LC box region into full image
-    # blended_lc_reg_full = np.zeros_like(lc_mask_full)
-    # blended_lc_reg_full[lc_box[0]:lc_box[0] + lc_box[2], lc_box[1]:lc_box[1] + lc_box[3]] = blended_lc_reg
     filled_img = original_img.copy()
+    blending_mask = blended_lc_reg == 1
+    blending_mask[:BLENDING_BUFFER] = False
+    blending_mask[-BLENDING_BUFFER:] = False
+    blending_mask[:, :BLENDING_BUFFER] = False
+    blending_mask[:, -BLENDING_BUFFER:] = False
     for i in range(3):
-        filled_img[:,:,i] = poissonBlend(cutout_region[:,:,i].astype(np.float32), blended_lc_reg == 1,
+        filled_img[:,:,i] = poissonBlend(cutout_region[:,:,i].astype(np.float32), blending_mask,
                                          filled_img[:,:,i].astype(np.float32), (lc_box[0], lc_box[1])).astype(np.uint8)
 
-    cv2.imwrite('filled_target_blended.jpg', filled_img)
-
-    return filled_img
+    return filled_img, blending_mask, best_candidate_img
 
 
 if __name__ == '__main__':
-    target = cv2.imread(r"target_img.png", cv2.IMREAD_UNCHANGED)
+    target = cv2.imread(r"0008_6.jpg", cv2.IMREAD_UNCHANGED)
     hole_mask_full = target[:, :, 3] == 0.0  # "full" means full size of target image
     target = target[:, :, [0, 1, 2]]
 
