@@ -148,6 +148,10 @@ def poissonBlend(object_img, object_mask, bg_img, bg_ul):
     
     # Copy patch back into background image
     output_img = bg_img.copy()
+    # output_patch -= np.min(output_patch)
+    # output_patch /= np.max(output_patch)
+    # output_patch *= 255.0
+    output_patch = np.clip(output_patch, 0.0, 255.0)
     output_img[bg_ul[0]:bg_ul[0] + im_h, bg_ul[1]:bg_ul[1] + im_w] = output_patch
 
     return output_img
