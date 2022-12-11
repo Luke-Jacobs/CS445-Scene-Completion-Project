@@ -4,12 +4,14 @@ This GitHub repository contains our implementation of James Hays's and Alexei Ef
 
 ## Prerequisites
 
-Use the package manager [pip](https://pip.pypa.io/en/stable/) to install any necessary libraries used. Extract the zip files located in the `\dataset` subdirectory, `\thousand-of-each` and `\5k-of-each`.
+Use the package manager [pip](https://pip.pypa.io/en/stable/) to install any necessary libraries used. 
+
+Zip files containing the dataset we initially used can be found [here](https://drive.google.com/file/d/17e97oyOMjTLvtWbgoUnoV2KWPckOM3Yg/view?usp=sharing) (1.24 GB) and [here](https://drive.google.com/file/d/1CVjy_BWUkzs2hDsZLc79iAUu6D3UxeJy/view?usp=share_link) (5.18 GB). You will need to log in with an Illinois email to access these. Extract these zip files into a new `\dataset` subdirectory, called `\thousand-of-each` and `\5k-of-each`.
 
 Test files, containing pairs of sample images with object masks can be found at the original paper's [website](http://graphics.cs.cmu.edu/projects/scene-completion/), under Data.
 
 ## Organization
-`dataset` - Directory containing subdirectories of our database of images. `\thousand-of-each` contains one thousand images from five different categories, and `\5k-of-each` contains five thousand images from five different categories. By default, as noted in `semantic_scene_matching.py`, we use the latter.
+`dataset` - Directory containing subdirectories of our database of images. `\thousand-of-each` contains one thousand images from five different categories, and `\5k-of-each` contains five thousand images from five different categories, as downloaded above. By default, as noted in `semantic_scene_matching.py`, we use the latter.
 
 `results` - Directory containing sample results, as used in our final report.
 
