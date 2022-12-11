@@ -141,7 +141,7 @@ for theta in range(4):
 # In[19]:
 
 
-dataset_dir = dataset + "thousand_of_each/"
+dataset_dir = dataset + "5k_of_each/"
 
 
 # In[20]:
